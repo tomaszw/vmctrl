@@ -21,5 +21,6 @@ Executable vmctrl
         aeson,
         text,
         utf8-string,
+        streamly,
         MonadPrompt
 

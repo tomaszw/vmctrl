@@ -11,12 +11,21 @@ import qualified Data.Text.IO as T
 import qualified Data.Text.Encoding as T
 import Data.Text (Text)
 import Data.Text.Read
+import Data.Word
+import Data.Function
 import qualified Data.Map as M
 import qualified Data.HashMap.Strict as HM
 import Control.Monad.Prompt
 import Control.Monad
 import Control.Concurrent
 import Control.Concurrent.Chan
+
+import Streamly
+import qualified Streamly.Network.Socket as SNS
+import qualified Streamly.Prelude as S
+import qualified Streamly.Data.Unicode.Stream as UnicodeS
+import qualified Streamly.Network.Inet.TCP as TCP
+import qualified Streamly.Data.Fold as FL
 
 import Network.Socket
 import Network.Socket.ByteString
@@ -178,17 +187,32 @@ parseStatusMessage m
 jsonToDictMessage :: LB.ByteString -> Maybe DictMessage
 jsonToDictMessage json = AE.decode json
 
-dictMessagesChan :: Handle -> IO (Chan DictMessage)
-dictMessagesChan h = do
+lineStream :: (IsStream t, Monad m) => t m Word8 -> t m Text
+lineStream s =
+    UnicodeS.decodeUtf8 s
+  & S.splitWithSuffix eol FL.toList
+  & S.map T.pack
+  & S.map (T.dropWhileEnd crlf)
+  where
+    eol  x = x == '\n'
+    crlf x = x == '\n' || x == '\r'
+
+dictMessagesChan :: Socket -> IO (Chan DictMessage)
+dictMessagesChan s = do
   ch <- newChan
-  forkIO $ (forever $ do
-    l <- B.hGetLine h
-    putStrLn $ " <--- " ++ T.unpack (trim (T.decodeUtf8 l) 100)
-    case jsonToDictMessage (LB.fromStrict l) of
-      Just m -> writeChan ch m
-      _      -> return ()) `catchIOError` onError
+  forkIO $ do
+    S.drain $
+        S.unfold SNS.read s
+      & lineStream
+      & S.mapM (doLine ch)
   return ch
   where
+    doLine ch text = (do
+      putStrLn $ " <--- " ++ T.unpack (trim text 100)
+      case jsonToDictMessage (LB.fromStrict (T.encodeUtf8 text)) of
+        Just m -> writeChan ch m
+        _      -> return ()) `catchIOError` onError
+
     onError err | isEOFError err = putStrLn "EOF!"
                 | otherwise = putStrLn $ "channel error " ++ show err
 
@@ -203,16 +227,18 @@ nextStatusMessage ch = do
     from Nothing  = nextStatusMessage ch
     from (Just m) = return m
 
-handleBotPrompt :: Handle -> MVar CommandID -> Chan DictMessage -> BotRequest a -> IO a
-handleBotPrompt sockH cmdID ch req = handlePrompt req where
+handleBotPrompt :: Socket -> MVar CommandID -> Chan DictMessage -> BotRequest a -> IO a
+handleBotPrompt sock cmdID ch req = handlePrompt req where
 
   nextCommandID = modifyMVar cmdID $ \id -> return (id+1, id)
 
   handlePrompt (SendCommand cmd) = do
     id <- nextCommandID
-    let cmdText = T.decodeUtf8 $ LB.toStrict (AE.encode $ commandToJSON (Just id) cmd)
+    let cmdText    = T.decodeUtf8 cmdByteStr
+        cmdByteStr = LB.toStrict (AE.encode $ commandToJSON (Just id) cmd)
+
     putStrLn $ " ---> " ++ (T.unpack cmdText)
-    T.hPutStrLn sockH cmdText
+    sendAll sock $ cmdByteStr `B.snoc` 10 -- eol
     return id
 
   handlePrompt (WaitCommandStatus cmdID) = do
@@ -237,26 +263,20 @@ handleBotPrompt sockH cmdID ch req = handlePrompt req where
 
   handlePrompt (Delay ms) = threadDelay (1000 * ms)
 
-runBot :: Handle -> Bot () -> IO ()
-runBot h bot = do
-  messagesCh <- dictMessagesChan h
+runBot :: Socket -> Bot () -> IO ()
+runBot s bot = do
+  messagesCh <- dictMessagesChan s
   cmdID <- newMVar 1
-  runPromptM (handleBotPrompt h cmdID messagesCh) (unBot bot)
+  runPromptM (handleBotPrompt s cmdID messagesCh) (unBot bot)
    
 runServer :: PortNumber -> IO ()
-runServer port = do
-  sock <- socket AF_INET Stream defaultProtocol
-  bind sock ( SockAddrInet port 0 )
-  listen sock 1
-  handleConnections sock
+runServer port =
+  S.drain . S.take 1 $
+  S.unfold TCP.acceptOnPort port & S.mapM handleConnection
   where
-    handleConnections sock = do
-      (conn, peer) <- accept sock
+    handleConnection s = do
       putStrLn "connected!"
-      h <- socketToHandle conn ReadWriteMode
-      --hSetBuffering h LineBuffering
-      runBot h resumeBot
-      hFlush h
+      runBot s resumeBot
       putStrLn "bot done"
 
 main = withSocketsDo $ do
