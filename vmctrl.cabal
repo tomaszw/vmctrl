@@ -1,0 +1,25 @@
+Name: vmctrl
+Version: 0.0
+Author: Tomasz Wroblewski
+Build-Type: Simple
+Cabal-Version: >= 1.2
+
+Executable vmctrl
+  hs-source-dirs: .
+  Main-is: Main.hs             
+  GHC-Options: -O2 -fwarn-incomplete-patterns -threaded
+  Extensions: ScopedTypeVariables,GeneralizedNewtypeDeriving, GADTs, ExistentialQuantification, MultiParamTypeClasses, RankNTypes, PatternGuards, ForeignFunctionInterface, FlexibleContexts,FlexibleInstances,DeriveDataTypeable, OverloadedStrings
+  Build-Depends:
+        base,
+        mtl,
+        time,
+        binary,
+        bytestring,
+        network,
+        containers,
+        unordered-containers,
+        aeson,
+        text,
+        utf8-string,
+        MonadPrompt
+
