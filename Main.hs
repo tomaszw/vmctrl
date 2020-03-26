@@ -125,12 +125,23 @@ assertStatusOK s
     isCommandStatusOK (CS _ _ "ok") = True
     isCommandStatusOK _ = False
 
+-- simplest suspend resume bot
+resumeBot :: Bot ()
+resumeBot = do
+  waitVmState Running
+  mapM_ cycle [1..1000]
+  where
+    cycle x = do
+      info $ "CYCLE " ++ show x
+      commandSendAndWait CommandSaveCuckoo >>= assertStatusOK
+      commandSendAndWait CommandResume >>= assertStatusOK
+
 -- suspend resume bot with aborted resumes
 resumeAbortBot :: Bot ()
 resumeAbortBot = do
   waitVmState Running
   delay 4000
-  mapM_ cycle [1..1000]
+  mapM_ cycle [1..10]
   where
     cycle x = do
       info $ "CYCLE " ++ show x
@@ -145,17 +156,6 @@ resumeAbortBot = do
       -- next resume must succeed
       commandSendAndWait CommandResume >>= assertStatusOK
       
--- simplest suspend resume bot
-resumeBot :: Bot ()
-resumeBot = do
-  waitVmState Running
-  mapM_ cycle [1..5]
-  where
-    cycle x = do
-      info $ "CYCLE " ++ show x
-      commandSendAndWait CommandSaveCuckoo >>= assertStatusOK
-      commandSendAndWait CommandResume >>= assertStatusOK
-
 parseVmState :: Text -> Maybe VmState
 parseVmState "running"   = Just Running
 parseVmState "paused"    = Just Paused
@@ -163,37 +163,35 @@ parseVmState "suspended" = Just Suspended
 parseVmState "shutdown"  = Just Shutdown
 parseVmState _           = Nothing
 
-parseStatusMessage :: DictMessage -> Maybe VmStatusMessage
-parseStatusMessage m
-  | Just runstateStr <- valueOf "vm-runstate"
-  = VmStateChanged <$> parseVmState runstateStr
-
-  | Just status <- valueOf "status"
-  , Just cmd    <- valueOf "command"
-  = Just (CommandStatus (CS id cmd status))
-
-  | otherwise = Nothing
-  where
-    valueOf :: String -> Maybe Text
-    valueOf k | Just (AE.String s) <- k `M.lookup` m = Just s
-              | otherwise = Nothing
-
-    id :: Maybe CommandID
-    id | Just (AE.String idText) <- "id" `M.lookup` m =
-           case decimal idText of
-             Right (x, _) -> Just x
-             _            -> Nothing
-       | otherwise = Nothing
-          
-    
-jsonToDictMessage :: LB.ByteString -> Maybe DictMessage
-jsonToDictMessage json = AE.decode json
-
 statusMessageStream :: (IsStream t, Monad m) => t m DictMessage -> t m VmStatusMessage
 statusMessageStream =
     S.map fromJust . S.filter isJust
   . S.map parseStatusMessage
+  where
+    parseStatusMessage :: DictMessage -> Maybe VmStatusMessage
+    parseStatusMessage m
+      | Just runstateStr <- valueOf "vm-runstate"
+      = VmStateChanged <$> parseVmState runstateStr
 
+      | Just status <- valueOf "status"
+      , Just cmd    <- valueOf "command"
+      = Just (CommandStatus (CS id cmd status))
+
+      | otherwise = Nothing
+      where
+        valueOf :: String -> Maybe Text
+        valueOf k | Just (AE.String s) <- k `M.lookup` m = Just s
+                  | otherwise = Nothing
+
+        id :: Maybe CommandID
+        id | Just (AE.String idText) <- "id" `M.lookup` m =
+               case decimal idText of
+                 Right (x, _) -> Just x
+                 _            -> Nothing
+           | otherwise = Nothing
+          
+    
+    
 dictMessageStream :: (IsStream t, Monad m) => t m Text -> t m DictMessage
 dictMessageStream s =
   -- text to bytestring
@@ -202,6 +200,10 @@ dictMessageStream s =
   & S.map jsonToDictMessage
   -- remove maybes
   & S.filter isJust & S.map fromJust
+  where
+    jsonToDictMessage :: LB.ByteString -> Maybe DictMessage
+    jsonToDictMessage json = AE.decode json
+
 
 lineStream :: (IsStream t, Monad m) => t m Word8 -> t m Text
 lineStream s =
