@@ -35,6 +35,14 @@ import System.IO
 import System.IO.Error
 import System.IO.Unsafe
 import System.Exit
+import System.Process
+import System.FilePath
+import System.Environment
+
+hostIP = "127.0.0.1"
+ccPort = 8888
+templateJson = "c:\\uxatto\\template.json"
+dmPath = "c:\\uxatto"
 
 data VmState =
     Running
@@ -48,6 +56,9 @@ data Command =
   | CommandSaveCuckoo
   | CommandResume
   | CommandResumeAbort
+  | CommandPause
+  | CommandUnpause
+  | CommandQuit
   deriving (Eq, Show)
 
 type CommandID   = Int
@@ -56,6 +67,11 @@ type StatusText  = Text
 
 data CommandStatus = CS !(Maybe CommandID) !CommandText !StatusText
   deriving (Eq, Show)
+
+data CommandChannel = CommandChannel Socket
+  deriving (Eq, Show)
+
+data Dm = Dm !ProcessHandle !CommandChannel
 
 data VmStatusMessage =
      VmStateChanged !VmState
@@ -74,6 +90,8 @@ data BotRequest a where
   WaitVmState :: VmState -> BotRequest ()
   Print :: String -> BotRequest ()
   Delay :: Int -> BotRequest ()
+  SpawnVm :: String -> BotRequest ()
+  ConnectVm :: BotRequest ()
 
 commandToJSON :: Maybe CommandID -> Command -> AE.Value
 commandToJSON id cmd =
@@ -94,6 +112,15 @@ commandToJSON id cmd =
                CommandResumeAbort -> [
                  "command" .= ("resume-abort" :: Text)
                  ]
+               CommandPause -> [
+                 "command" .= ("pause" :: Text)
+                 ]
+               CommandUnpause -> [
+                 "command" .= ("unpause" :: Text)
+                 ]
+               CommandQuit -> [
+                 "command" .= ("quit" :: Text)
+                 ]
 
     idfield | Just id_ <- id   = ["id" .= (fromString (show id_) :: Text)]
             | otherwise        = []
@@ -113,6 +140,12 @@ commandWaitStatus = prompt . WaitCommandStatus
 info :: String -> Bot ()
 info = prompt . Print
 
+spawnVm :: String -> Bot ()
+spawnVm = prompt . SpawnVm
+
+connectVm :: Bot ()
+connectVm = prompt ConnectVm
+
 commandSendAndWait :: Command -> Bot CommandStatus
 commandSendAndWait = commandSend >=> commandWaitStatus
 
@@ -126,22 +159,23 @@ assertStatusOK s
     isCommandStatusOK _ = False
 
 -- simplest suspend resume bot
-resumeBot :: Bot ()
-resumeBot = do
-  waitVmState Running
-  mapM_ cycle [1..1000]
+resumeBot :: Int -> Bot ()
+resumeBot ncycles = do
+  connectVm >> waitVmState Running
+  mapM_ cycle [1..ncycles]
   where
     cycle x = do
       info $ "CYCLE " ++ show x
+      delay 20
       commandSendAndWait CommandSaveCuckoo >>= assertStatusOK
       commandSendAndWait CommandResume >>= assertStatusOK
 
 -- suspend resume bot with aborted resumes
-resumeAbortBot :: Bot ()
-resumeAbortBot = do
-  waitVmState Running
+resumeAbortBot :: Int -> Bot ()
+resumeAbortBot ncycles = do
+  connectVm >> waitVmState Running
   delay 4000
-  mapM_ cycle [1..10]
+  mapM_ cycle [1..ncycles]
   where
     cycle x = do
       info $ "CYCLE " ++ show x
@@ -155,6 +189,32 @@ resumeAbortBot = do
       commandWaitStatus resumeID
       -- next resume must succeed
       commandSendAndWait CommandResume >>= assertStatusOK
+
+restartBot :: Int -> Bot ()
+restartBot ncycles = do
+  mapM_ cycle [1..ncycles]
+  where
+    cycle x = do
+      info $ "CYCLE " ++ show x
+      spawnVm "image.json"
+      waitVmState Running
+      delay 2000
+      killVm
+      delay 1000
+    killVm = commandSendAndWait CommandQuit >>= assertStatusOK
+    
+pauseBot :: Int -> Bot ()
+pauseBot ncycles = do
+  waitVmState Running
+  delay 60000
+  mapM_ cycle [1..ncycles]
+  where
+    cycle x = do
+      info $ "CYCLE " ++ show x
+      delay 2000
+      commandSendAndWait CommandPause >>= assertStatusOK
+      delay 1000
+      commandSendAndWait CommandUnpause >>= assertStatusOK
       
 parseVmState :: Text -> Maybe VmState
 parseVmState "running"   = Just Running
@@ -215,12 +275,21 @@ lineStream s =
     eol  x = x == '\n'
     crlf x = x == '\n' || x == '\r'
 
-handleBotPrompt :: Socket -> MVar CommandID -> BotRequest a -> IO a
-handleBotPrompt sock cmdID req = handlePrompt req where
+handleBotPrompt :: MVar (Maybe CommandChannel) -> MVar CommandID -> BotRequest a -> IO a
+handleBotPrompt cmdChannel cmdID req = handlePrompt req where
+
+  setChannel channel = modifyMVar_ cmdChannel $ \_ -> return (Just channel)
+  getChannel = readMVar cmdChannel
 
   nextCommandID = modifyMVar cmdID $ \id -> return (id+1, id)
 
+  connectChannel = do
+    Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort ccPort
+    setChannel (CommandChannel sock)
+    putStrLn $ "!! connected!"
+
   handlePrompt (SendCommand cmd) = do
+    Just (CommandChannel sock) <- getChannel
     id <- nextCommandID
     let cmdText    = T.decodeUtf8 cmdByteStr
         cmdByteStr = LB.toStrict (AE.encode $ commandToJSON (Just id) cmd)
@@ -231,8 +300,9 @@ handleBotPrompt sock cmdID req = handlePrompt req where
 
   handlePrompt (WaitCommandStatus cmdID) = do
     putStrLn ( "wait for status of .. " ++ show cmdID)
+    Just ch <- getChannel
     Just v <- S.head $
-      statusMessages
+      statusMessages ch
       & S.map match
       & S.filter isJust & S.map fromJust
     return v
@@ -244,8 +314,9 @@ handleBotPrompt sock cmdID req = handlePrompt req where
 
   handlePrompt (WaitVmState s) = do
     putStrLn ("wait for vm state " ++ show s)
+    Just ch <- getChannel
     S.head $
-      statusMessages & S.filter match
+      statusMessages ch & S.filter match
     return ()
     where
       match (VmStateChanged s') | s == s' = True
@@ -253,8 +324,19 @@ handleBotPrompt sock cmdID req = handlePrompt req where
 
   handlePrompt (Delay ms) = threadDelay (1000 * ms)
 
-  statusMessages :: SerialT IO VmStatusMessage
-  statusMessages =
+  handlePrompt (SpawnVm conf) = do
+    closeChannel =<< getChannel
+    (_,_,_, ph) <- createProcess (uxendm conf)
+    putStrLn $ "started dm from " ++ conf
+    connectChannel
+    where
+      closeChannel (Just (CommandChannel sock)) = close sock
+      closeChannel _ = return ()
+
+  handlePrompt ConnectVm = connectChannel
+
+  statusMessages :: CommandChannel -> SerialT IO VmStatusMessage
+  statusMessages (CommandChannel sock) =
         S.unfold SN.read sock
       & lineStream
       & S.mapM dump
@@ -267,20 +349,51 @@ handleBotPrompt sock cmdID req = handlePrompt req where
         putStrLn $ " <--- " ++ (T.unpack $ trim l 100)
         return l
 
-runBot :: Socket -> Bot () -> IO ()
-runBot s bot = do
+runBot :: Bot () -> IO ()
+runBot bot = do
   cmdID <- newMVar 1
-  runPromptM (handleBotPrompt s cmdID) (unBot bot)
-   
-runServer :: PortNumber -> IO ()
-runServer port =
-  S.drain . S.take 1 $
-  S.unfold TCP.acceptOnPort port & S.mapM handleConnection
-  where
-    handleConnection s = (do
-      putStrLn "connected!"
-      runBot s resumeBot
-      putStrLn "bot done") `finally` (close s)
+  cc <- newMVar Nothing
+  runPromptM (handleBotPrompt cc cmdID) (unBot bot)
+
+uxendm :: FilePath -> CreateProcess
+uxendm confPath = proc (dmPath </> "uxendm.exe") ["-F", confPath, "-C", "tcp:" ++ hostIP ++ ":" ++ show ccPort]
+
+runDm :: IO Dm
+runDm = do
+  (_,_,_, ph) <- createProcess (uxendm templateJson)
+  putStrLn "started dm.."
+  Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort ccPort
+  return (Dm ph (CommandChannel sock))
+      
+--runServer :: PortNumber -> (Bot ()) -> IO ()
+--runServer port bot =
+--  S.drain . S.take 1 $
+--  S.unfold TCP.acceptOnPort port & S.mapM handleConnection
+--  where
+--    handleConnection s = (do
+--      putStrLn "connected!"
+--      runBot (CommandChannel s) bot
+--      putStrLn "bot done") `finally` (close s)
+
+botFromString :: String -> Maybe (Int -> Bot ())
+botFromString x = case x of
+  "resume" -> Just resumeBot
+  "resume-abort" -> Just resumeAbortBot
+  "pause" -> Just pauseBot
+  "restart" -> Just restartBot
+  _ -> Nothing
 
 main = withSocketsDo $ do
-  runServer 8888
+  args <- getArgs
+  bot <- return $
+        case args of
+          (botStr : cyclesStr : _)
+            | (Just bot, [(ncycles,_)]) <- (botFromString botStr, reads cyclesStr) -> bot ncycles
+          _ -> error "bad args"
+  putStrLn "starting..."
+  bot `seq` runBot bot
+    
+  --bot `seq` (runServer ccPort bot)
+  --dm <- runDm
+  --threadDelay (1000 * 5000)
+  

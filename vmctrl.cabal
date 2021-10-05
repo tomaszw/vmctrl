@@ -22,5 +22,6 @@ Executable vmctrl
         text,
         utf8-string,
         streamly,
+        process, filepath,
         MonadPrompt
 
