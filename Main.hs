@@ -9,6 +9,8 @@ import qualified Data.ByteString.Lazy as LB
 import qualified Data.Text as T
 import qualified Data.Text.IO as T
 import qualified Data.Text.Encoding as T
+import qualified Data.Text.Internal.Search as T
+
 import Data.Text (Text)
 import Data.Text.Read
 import Data.Word
@@ -28,6 +30,7 @@ import qualified Streamly.Prelude as S
 import qualified Streamly.Data.Unicode.Stream as UnicodeS
 import qualified Streamly.Network.Inet.TCP as TCP
 import qualified Streamly.Data.Fold as FL
+import qualified Streamly.Internal.FileSystem.File as File
 
 import Network.Socket
 import Network.Socket.ByteString
@@ -88,6 +91,7 @@ data BotRequest a where
   SendCommand :: Command -> BotRequest CommandID
   WaitCommandStatus :: CommandID -> BotRequest CommandStatus
   WaitVmState :: VmState -> BotRequest ()
+  WaitVmLogLine :: String -> BotRequest String
   Print :: String -> BotRequest ()
   Delay :: Int -> BotRequest ()
   SpawnVm :: String -> BotRequest ()
@@ -127,6 +131,9 @@ commandToJSON id cmd =
 
 waitVmState :: VmState -> Bot ()
 waitVmState = prompt . WaitVmState
+
+waitVmLogLine :: String -> Bot String
+waitVmLogLine = prompt . WaitVmLogLine
 
 delay :: Int -> Bot ()
 delay = prompt . Delay
@@ -185,7 +192,7 @@ resumeAbortBot ncycles = do
       resumeID <- commandSend CommandResume
       -- and immediately try to abort it
       commandSend CommandResumeAbort
-      -- success or fail initial resume, dont care
+      -- success or fail initial resume, dont care 
       commandWaitStatus resumeID
       -- next resume must succeed
       commandSendAndWait CommandResume >>= assertStatusOK
@@ -196,16 +203,17 @@ restartBot ncycles = do
   where
     cycle x = do
       info $ "CYCLE " ++ show x
-      spawnVm "image.json"
+      spawnVm "testatto.json"
       waitVmState Running
-      delay 2000
+      --waitVmLogLine "Dropbear SSH server"
+      delay 3000
       killVm
       delay 1000
     killVm = commandSendAndWait CommandQuit >>= assertStatusOK
     
 pauseBot :: Int -> Bot ()
 pauseBot ncycles = do
-  waitVmState Running
+  connectVm >> waitVmState Running
   delay 60000
   mapM_ cycle [1..ncycles]
   where
@@ -275,6 +283,23 @@ lineStream s =
     eol  x = x == '\n'
     crlf x = x == '\n' || x == '\r'
 
+scanLog :: String -> String -> IO (Maybe String)
+scanLog filename patt = do
+  v <- S.head $
+    File.toBytes filename
+    & lineStream
+    & S.map match
+    & S.filter isJust & S.map fromJust
+  case v of
+    Just x -> return $ Just (T.unpack x)
+    _ -> return Nothing
+  where
+    pattText = T.pack patt
+    match :: Text -> Maybe Text
+    match line = case T.indices pattText line of
+      (index:_) -> (Just line)
+      _ -> Nothing
+
 handleBotPrompt :: MVar (Maybe CommandChannel) -> MVar CommandID -> BotRequest a -> IO a
 handleBotPrompt cmdChannel cmdID req = handlePrompt req where
 
@@ -322,6 +347,16 @@ handleBotPrompt cmdChannel cmdID req = handlePrompt req where
       match (VmStateChanged s') | s == s' = True
       match _ = False
 
+  handlePrompt (WaitVmLogLine s) = do
+    putStrLn ("wait for vm log line " ++ show s)
+    waitLine s
+    where
+      waitLine s = do
+        r <- scanLog "uxendm.log" s
+        case r of
+          (Just l) -> return l
+          _ -> threadDelay 2000 >> waitLine s
+    
   handlePrompt (Delay ms) = threadDelay (1000 * ms)
 
   handlePrompt (SpawnVm conf) = do
