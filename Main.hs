@@ -43,7 +43,7 @@ import System.FilePath
 import System.Environment
 
 hostIP = "127.0.0.1"
-ccPort = 8888
+ccPortBase = 8888
 templateJson = "c:\\uxatto\\template.json"
 dmPath = "c:\\uxatto"
 
@@ -300,8 +300,8 @@ scanLog filename patt = do
       (index:_) -> (Just line)
       _ -> Nothing
 
-handleBotPrompt :: MVar (Maybe CommandChannel) -> MVar CommandID -> BotRequest a -> IO a
-handleBotPrompt cmdChannel cmdID req = handlePrompt req where
+handleBotPrompt :: MVar (Maybe CommandChannel) -> MVar CommandID -> PortNumber -> BotRequest a -> IO a
+handleBotPrompt cmdChannel cmdID port req = handlePrompt req where
 
   setChannel channel = modifyMVar_ cmdChannel $ \_ -> return (Just channel)
   getChannel = readMVar cmdChannel
@@ -309,7 +309,7 @@ handleBotPrompt cmdChannel cmdID req = handlePrompt req where
   nextCommandID = modifyMVar cmdID $ \id -> return (id+1, id)
 
   connectChannel = do
-    Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort ccPort
+    Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort port
     setChannel (CommandChannel sock)
     putStrLn $ "!! connected!"
 
@@ -361,7 +361,7 @@ handleBotPrompt cmdChannel cmdID req = handlePrompt req where
 
   handlePrompt (SpawnVm conf) = do
     closeChannel =<< getChannel
-    (_,_,_, ph) <- createProcess (uxendm conf)
+    (_,_,_, ph) <- createProcess (uxendm conf port)
     putStrLn $ "started dm from " ++ conf
     connectChannel
     where
@@ -384,20 +384,20 @@ handleBotPrompt cmdChannel cmdID req = handlePrompt req where
         putStrLn $ " <--- " ++ (T.unpack $ trim l 100)
         return l
 
-runBot :: Bot () -> IO ()
-runBot bot = do
+runBot :: PortNumber -> Bot () -> IO ()
+runBot port bot = do
   cmdID <- newMVar 1
   cc <- newMVar Nothing
-  runPromptM (handleBotPrompt cc cmdID) (unBot bot)
+  runPromptM (handleBotPrompt cc cmdID port) (unBot bot)
 
-uxendm :: FilePath -> CreateProcess
-uxendm confPath = proc (dmPath </> "uxendm.exe") ["-F", confPath, "-C", "tcp:" ++ hostIP ++ ":" ++ show ccPort]
+uxendm :: FilePath -> PortNumber -> CreateProcess
+uxendm confPath port = proc (dmPath </> "uxendm.exe") ["-F", confPath, "-C", "tcp:" ++ hostIP ++ ":" ++ show port]
 
-runDm :: IO Dm
-runDm = do
-  (_,_,_, ph) <- createProcess (uxendm templateJson)
+runDm :: PortNumber -> IO Dm
+runDm port = do
+  (_,_,_, ph) <- createProcess (uxendm templateJson port)
   putStrLn "started dm.."
-  Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort ccPort
+  Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort port
   return (Dm ph (CommandChannel sock))
       
 --runServer :: PortNumber -> (Bot ()) -> IO ()
@@ -430,11 +430,11 @@ main = withSocketsDo $ do
               -> map (\b -> b ncycles) bots
           _ -> error "bad args"
   putStrLn "starting..."
-  threads <- mapM (\bot -> bot `seq` do
+  threads <- mapM (\(bot,port) -> bot `seq` do
                            mvar <- newEmptyMVar
-                           forkFinally (runBot bot) (\_ -> putMVar mvar ())
+                           forkOS $ finally (runBot port bot) (putMVar mvar ())
                            return mvar)
-             bots
+             (zip bots [ccPortBase..])
   mapM_ takeMVar threads
                            
   
