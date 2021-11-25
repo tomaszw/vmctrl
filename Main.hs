@@ -197,13 +197,13 @@ resumeAbortBot ncycles = do
       -- next resume must succeed
       commandSendAndWait CommandResume >>= assertStatusOK
 
-restartBot :: Int -> Bot ()
-restartBot ncycles = do
+restartBot :: String -> Int -> Bot ()
+restartBot json ncycles = do
   mapM_ cycle [1..ncycles]
   where
     cycle x = do
-      info $ "CYCLE " ++ show x
-      spawnVm "testatto.json"
+      info $ "CYCLE " ++ show x ++ " --- " ++ json
+      spawnVm json
       waitVmState Running
       --waitVmLogLine "Dropbear SSH server"
       delay 3000
@@ -410,25 +410,31 @@ runDm = do
 --      runBot (CommandChannel s) bot
 --      putStrLn "bot done") `finally` (close s)
 
-botFromString :: String -> Maybe (Int -> Bot ())
+botFromString :: String -> [Int -> Bot ()]
 botFromString x = case x of
-  "resume" -> Just resumeBot
-  "resume-abort" -> Just resumeAbortBot
-  "pause" -> Just pauseBot
-  "restart" -> Just restartBot
-  _ -> Nothing
+  "resume" -> [resumeBot]
+  "resume-abort" -> [resumeAbortBot]
+  "pause" -> [pauseBot]
+  "restart" -> [restartBot "testatto.json"]
+  "manyrestarts" -> map restartBot ["testatto.json", "testatto2.json", "testatto3.json", "testatto4.json"]
+  _ -> []
 
 main = withSocketsDo $ do
   args <- getArgs
-  bot <- return $
+  bots <- return $
         case args of
           (botStr : cyclesStr : _)
-            | (Just bot, [(ncycles,_)]) <- (botFromString botStr, reads cyclesStr) -> bot ncycles
+            | bots           <- botFromString botStr,
+              [(ncycles,_)]  <- reads cyclesStr,
+              not (null bots)
+              -> map (\b -> b ncycles) bots
           _ -> error "bad args"
   putStrLn "starting..."
-  bot `seq` runBot bot
-    
-  --bot `seq` (runServer ccPort bot)
-  --dm <- runDm
-  --threadDelay (1000 * 5000)
+  threads <- mapM (\bot -> bot `seq` do
+                           mvar <- newEmptyMVar
+                           forkFinally (runBot bot) (\_ -> putMVar mvar ())
+                           return mvar)
+             bots
+  mapM_ takeMVar threads
+                           
   
