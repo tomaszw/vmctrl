@@ -197,6 +197,19 @@ resumeAbortBot ncycles = do
       -- next resume must succeed
       commandSendAndWait CommandResume >>= assertStatusOK
 
+saveAbortBot :: Int -> Bot ()
+saveAbortBot ncycles = do
+  connectVm >> waitVmState Running
+  delay 4000
+  mapM_ cycle [1..ncycles]
+  where
+    cycle x = do
+      info $ "CYCLE " ++ show x
+      -- suspend vm
+      commandSend CommandSaveCuckoo
+      commandSendAndWait CommandResume >>= assertStatusOK
+      delay 1000
+
 restartBot :: String -> Int -> Bot ()
 restartBot json ncycles = do
   mapM_ cycle [1..ncycles]
@@ -414,6 +427,7 @@ botFromString :: String -> [Int -> Bot ()]
 botFromString x = case x of
   "resume" -> [resumeBot]
   "resume-abort" -> [resumeAbortBot]
+  "save-abort" -> [saveAbortBot]
   "pause" -> [pauseBot]
   "restart" -> [restartBot "testatto.json"]
   "manyrestarts" -> map restartBot ["testatto.json", "testatto2.json", "testatto3.json", "testatto4.json"]
