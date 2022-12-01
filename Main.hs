@@ -475,7 +475,7 @@ botFromString x = case x of
   "save-abort" -> [saveAbortBot]
   "pause" -> [pauseBot]
   "restart" -> [restartBot "testatto.json"]
-  "eptfaults" -> [eptfaultBot "win11.json"]
+  "eptfaults" -> [eptfaultBot "20h2.json"]
   "manyrestarts" -> map restartBot ["testatto.json", "testatto2.json", "testatto3.json", "testatto4.json"]
   _ -> []
 
