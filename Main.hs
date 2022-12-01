@@ -45,7 +45,7 @@ import System.Environment
 hostIP = "127.0.0.1"
 ccPortBase = 8888
 templateJson = "c:\\uxatto\\template.json"
-dmPath = "c:\\uxatto"
+dmPath = "."
 
 data VmState =
     Running
@@ -91,10 +91,11 @@ data BotRequest a where
   SendCommand :: Command -> BotRequest CommandID
   WaitCommandStatus :: CommandID -> BotRequest CommandStatus
   WaitVmState :: VmState -> BotRequest ()
-  WaitVmLogLine :: String -> BotRequest String
+  WaitVmLogLine :: String -> Int -> BotRequest (Maybe String)
   Print :: String -> BotRequest ()
   Delay :: Int -> BotRequest ()
   SpawnVm :: String -> BotRequest ()
+  SnapshotVhd :: String -> String -> BotRequest ()
   ConnectVm :: BotRequest ()
 
 commandToJSON :: Maybe CommandID -> Command -> AE.Value
@@ -132,8 +133,8 @@ commandToJSON id cmd =
 waitVmState :: VmState -> Bot ()
 waitVmState = prompt . WaitVmState
 
-waitVmLogLine :: String -> Bot String
-waitVmLogLine = prompt . WaitVmLogLine
+waitVmLogLine :: String -> Int -> Bot (Maybe String)
+waitVmLogLine str tmo = prompt (WaitVmLogLine str tmo)
 
 delay :: Int -> Bot ()
 delay = prompt . Delay
@@ -149,6 +150,9 @@ info = prompt . Print
 
 spawnVm :: String -> Bot ()
 spawnVm = prompt . SpawnVm
+
+snapshotVhd :: String -> String -> Bot ()
+snapshotVhd name par = prompt (SnapshotVhd name par)
 
 connectVm :: Bot ()
 connectVm = prompt ConnectVm
@@ -223,7 +227,28 @@ restartBot json ncycles = do
       killVm
       delay 1000
     killVm = commandSendAndWait CommandQuit >>= assertStatusOK
-    
+
+eptfaultBot :: String -> Int -> Bot ()
+eptfaultBot json ncycles = do
+  cycle 1
+  where
+    waitTimeSecs = 45
+    cycle x = do
+      info $ "CYCLE " ++ show x ++ " --- " ++ json
+      snapshotVhd "20h2-2.vhd" "20h2.vhd"
+      spawnVm json
+      waitVmState Running
+      line <- waitVmLogLine "Back-to-back" waitTimeSecs
+      case line of
+        Just l -> info $ "Back to back violations detected!! " ++ l
+        _ -> do
+          info $ "no violation, go on"
+          killVm
+          delay 5000
+          when (x < ncycles) $ do
+            cycle (x+1)
+    killVm = commandSendAndWait CommandQuit >>= assertStatusOK
+  
 pauseBot :: Int -> Bot ()
 pauseBot ncycles = do
   connectVm >> waitVmState Running
@@ -360,15 +385,21 @@ handleBotPrompt cmdChannel cmdID port req = handlePrompt req where
       match (VmStateChanged s') | s == s' = True
       match _ = False
 
-  handlePrompt (WaitVmLogLine s) = do
+  handlePrompt (WaitVmLogLine s timeout) = do
     putStrLn ("wait for vm log line " ++ show s)
-    waitLine s
+    waitLine s 0
     where
-      waitLine s = do
+      waitLine s timepassed = do
         r <- scanLog "uxendm.log" s
         case r of
-          (Just l) -> return l
-          _ -> threadDelay 2000 >> waitLine s
+          (Just l) -> return (Just l)
+          _ | (timeout > 0)
+              && (timepassed >= timeout) -> do
+                putStrLn "timeout"
+                return Nothing
+            | otherwise -> do
+                threadDelay 1000000
+                waitLine s (timepassed+1)
     
   handlePrompt (Delay ms) = threadDelay (1000 * ms)
 
@@ -382,7 +413,7 @@ handleBotPrompt cmdChannel cmdID port req = handlePrompt req where
       closeChannel _ = return ()
 
   handlePrompt ConnectVm = connectChannel
-
+  handlePrompt (SnapshotVhd name par) = runSnapshotVhd name par
   statusMessages :: CommandChannel -> SerialT IO VmStatusMessage
   statusMessages (CommandChannel sock) =
         S.unfold SN.read sock
@@ -412,7 +443,21 @@ runDm port = do
   putStrLn "started dm.."
   Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort port
   return (Dm ph (CommandChannel sock))
+
+runSnapshotVhd :: String -> String -> IO ()
+runSnapshotVhd snapshotName parentName = do
+    retry 5
+    where
+      retry 0 = error $ "FAIL"
+      retry n = do
+        (_,_,_, ph) <- createProcess $ proc ("." </> "vhd-util.exe") ["snapshot", "-n", snapshotName, "-p", parentName]
+        ex <- waitForProcess ph
+        when (ex /= ExitSuccess) $ do
+          putStrLn $ "bad vhdutil exit code " ++ show ex
+          threadDelay (1000000)
+          retry (n-1)
       
+  
 --runServer :: PortNumber -> (Bot ()) -> IO ()
 --runServer port bot =
 --  S.drain . S.take 1 $
@@ -430,6 +475,7 @@ botFromString x = case x of
   "save-abort" -> [saveAbortBot]
   "pause" -> [pauseBot]
   "restart" -> [restartBot "testatto.json"]
+  "eptfaults" -> [eptfaultBot "win11.json"]
   "manyrestarts" -> map restartBot ["testatto.json", "testatto2.json", "testatto3.json", "testatto4.json"]
   _ -> []
 
