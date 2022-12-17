@@ -92,6 +92,7 @@ data BotRequest a where
   WaitCommandStatus :: CommandID -> BotRequest CommandStatus
   WaitVmState :: VmState -> BotRequest ()
   WaitVmLogLine :: String -> Int -> BotRequest (Maybe String)
+  WaitEnter :: BotRequest ()
   Print :: String -> BotRequest ()
   Delay :: Int -> BotRequest ()
   SpawnVm :: String -> BotRequest ()
@@ -135,6 +136,9 @@ waitVmState = prompt . WaitVmState
 
 waitVmLogLine :: String -> Int -> Bot (Maybe String)
 waitVmLogLine str tmo = prompt (WaitVmLogLine str tmo)
+
+waitEnter :: Bot ()
+waitEnter = prompt WaitEnter
 
 delay :: Int -> Bot ()
 delay = prompt . Delay
@@ -232,7 +236,7 @@ eptfaultBot :: String -> Int -> Bot ()
 eptfaultBot json ncycles = do
   cycle 1
   where
-    waitTimeSecs = 45
+    waitTimeSecs = 55
     cycle x = do
       info $ "CYCLE " ++ show x ++ " --- " ++ json
       snapshotVhd "20h2-2.vhd" "20h2.vhd"
@@ -244,7 +248,7 @@ eptfaultBot json ncycles = do
         _ -> do
           info $ "no violation, go on"
           killVm
-          delay 5000
+          delay 4000
           when (x < ncycles) $ do
             cycle (x+1)
     killVm = commandSendAndWait CommandQuit >>= assertStatusOK
@@ -252,14 +256,14 @@ eptfaultBot json ncycles = do
 pauseBot :: Int -> Bot ()
 pauseBot ncycles = do
   connectVm >> waitVmState Running
-  delay 60000
+  waitEnter
   mapM_ cycle [1..ncycles]
   where
     cycle x = do
       info $ "CYCLE " ++ show x
-      delay 2000
+      delay 800
       commandSendAndWait CommandPause >>= assertStatusOK
-      delay 1000
+      delay 800
       commandSendAndWait CommandUnpause >>= assertStatusOK
       
 parseVmState :: Text -> Maybe VmState
@@ -375,6 +379,11 @@ handleBotPrompt cmdChannel cmdID port req = handlePrompt req where
 
   handlePrompt (Print s) = putStrLn s
 
+  handlePrompt (WaitEnter) = do
+    putStrLn "press ENTER"
+    getLine
+    return ()
+    
   handlePrompt (WaitVmState s) = do
     putStrLn ("wait for vm state " ++ show s)
     Just ch <- getChannel
