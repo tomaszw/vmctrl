@@ -41,6 +41,7 @@ import System.Exit
 import System.Process
 import System.FilePath
 import System.Environment
+import System.Random
 
 hostIP = "127.0.0.1"
 ccPortBase = 8888
@@ -95,6 +96,8 @@ data BotRequest a where
   WaitEnter :: BotRequest ()
   Print :: String -> BotRequest ()
   Delay :: Int -> BotRequest ()
+  RandomDelay :: (Int,Int) -> BotRequest ()
+  CoinToss :: BotRequest Bool
   SpawnVm :: String -> BotRequest ()
   SnapshotVhd :: String -> String -> BotRequest ()
   ConnectVm :: BotRequest ()
@@ -142,6 +145,9 @@ waitEnter = prompt WaitEnter
 
 delay :: Int -> Bot ()
 delay = prompt . Delay
+
+randomDelay :: (Int,Int) -> Bot ()
+randomDelay = prompt . RandomDelay
 
 commandSend :: Command -> Bot CommandID
 commandSend = prompt . SendCommand
@@ -217,6 +223,24 @@ saveAbortBot ncycles = do
       commandSend CommandSaveCuckoo
       commandSendAndWait CommandResume >>= assertStatusOK
       delay 1000
+
+abortTortureBot :: Int -> Bot ()
+abortTortureBot ncycles = do
+  connectVm >> waitVmState Running
+  waitEnter
+  mapM_ cycle [1..ncycles]
+  where
+    cycle x = do
+      info $ "CYCLE " ++ show x
+      commandSend CommandSaveCuckoo
+      randomDelay (0, 2000)
+      commandSendAndWait CommandResume
+      randomDelay (0, 2000)
+      -- abort resume maybe, maybe not ?
+      coin <- prompt CoinToss
+      when coin $ do
+        commandSendAndWait CommandResumeAbort
+        randomDelay (0, 2000)
 
 restartBot :: String -> Int -> Bot ()
 restartBot json ncycles = do
@@ -411,6 +435,12 @@ handleBotPrompt cmdChannel cmdID port req = handlePrompt req where
                 waitLine s (timepassed+1)
     
   handlePrompt (Delay ms) = threadDelay (1000 * ms)
+  handlePrompt (RandomDelay (minms, maxms)) = do
+    ms <- randomRIO (minms, maxms)
+    threadDelay (1000 * ms)
+  handlePrompt CoinToss = do
+    v :: Int <- randomRIO (0, 1)
+    return (v == 1)
 
   handlePrompt (SpawnVm conf) = do
     closeChannel =<< getChannel
@@ -482,6 +512,7 @@ botFromString x = case x of
   "resume" -> [resumeBot]
   "resume-abort" -> [resumeAbortBot]
   "save-abort" -> [saveAbortBot]
+  "abort-torture" -> [abortTortureBot]
   "pause" -> [pauseBot]
   "restart" -> [restartBot "testatto.json"]
   "eptfaults" -> [eptfaultBot "20h2.json"]

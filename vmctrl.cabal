@@ -16,6 +16,7 @@ Executable vmctrl
         binary,
         bytestring,
         network,
+        random,
         containers,
         unordered-containers,
         aeson,
