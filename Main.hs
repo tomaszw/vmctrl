@@ -189,7 +189,7 @@ resumeBot ncycles = do
 resumeAbortBot :: Int -> Bot ()
 resumeAbortBot ncycles = do
   connectVm >> waitVmState Running
-  delay 4000
+  waitEnter
   mapM_ cycle [1..ncycles]
   where
     cycle x = do
@@ -208,7 +208,7 @@ resumeAbortBot ncycles = do
 saveAbortBot :: Int -> Bot ()
 saveAbortBot ncycles = do
   connectVm >> waitVmState Running
-  delay 4000
+  waitEnter
   mapM_ cycle [1..ncycles]
   where
     cycle x = do
