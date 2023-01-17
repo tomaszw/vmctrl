@@ -109,12 +109,12 @@ commandToJSON id cmd =
     fields = case cmd of
                CommandSave ->  [
                  "command" .= ("save" :: Text),
-                 "savefile" .= ("savefile" :: Text)
+                 "filename" .= ("savefile" :: Text)
                  ]
                CommandSaveCuckoo ->  [
                  "command"  .= ("save" :: Text),
                  "compress" .= ("cuckoo" :: Text),
-                 "savefile" .= ("savefile" :: Text)
+                 "filename" .= ("savefile" :: Text)
                  ]
                CommandResume -> [
                  "command" .= ("resume" :: Text)
