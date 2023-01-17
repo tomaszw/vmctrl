@@ -98,7 +98,7 @@ data BotRequest a where
   Delay :: Int -> BotRequest ()
   RandomDelay :: (Int,Int) -> BotRequest ()
   CoinToss :: BotRequest Bool
-  SpawnVm :: String -> BotRequest ()
+  SpawnVm :: (String, Maybe String) -> BotRequest ()
   SnapshotVhd :: String -> String -> BotRequest ()
   ConnectVm :: BotRequest ()
 
@@ -108,7 +108,8 @@ commandToJSON id cmd =
   where
     fields = case cmd of
                CommandSave ->  [
-                 "command" .= ("save" :: Text)
+                 "command" .= ("save" :: Text),
+                 "savefile" .= ("savefile" :: Text)
                  ]
                CommandSaveCuckoo ->  [
                  "command"  .= ("save" :: Text),
@@ -158,7 +159,7 @@ commandWaitStatus = prompt . WaitCommandStatus
 info :: String -> Bot ()
 info = prompt . Print
 
-spawnVm :: String -> Bot ()
+spawnVm :: (String, Maybe String) -> Bot ()
 spawnVm = prompt . SpawnVm
 
 snapshotVhd :: String -> String -> Bot ()
@@ -183,12 +184,25 @@ assertStatusOK s
 resumeBot :: Int -> Bot ()
 resumeBot ncycles = do
   connectVm >> waitVmState Running
+  waitEnter
   mapM_ cycle [1..ncycles]
   where
     cycle x = do
       info $ "CYCLE " ++ show x
-      delay 20
+      delay 1500
       commandSendAndWait CommandSaveCuckoo >>= assertStatusOK
+      commandSendAndWait CommandResume >>= assertStatusOK
+
+resumeBot2 :: Int -> Bot ()
+resumeBot2 ncycles = do
+  connectVm >> waitVmState Running
+  waitEnter
+  mapM_ cycle [1..ncycles]
+  where
+    cycle x = do
+      info $ "CYCLE " ++ show x
+      delay 1500
+      commandSendAndWait CommandSave >>= assertStatusOK
       commandSendAndWait CommandResume >>= assertStatusOK
 
 -- suspend resume bot with aborted resumes
@@ -233,14 +247,14 @@ abortTortureBot ncycles = do
     cycle x = do
       info $ "CYCLE " ++ show x
       commandSend CommandSaveCuckoo
-      randomDelay (0, 2000)
+      randomDelay (0, 5000)
       commandSendAndWait CommandResume
-      randomDelay (0, 2000)
+      randomDelay (0, 5000)
       -- abort resume maybe, maybe not ?
       coin <- prompt CoinToss
       when coin $ do
         commandSendAndWait CommandResumeAbort
-        randomDelay (0, 2000)
+        randomDelay (0, 5000)
 
 restartBot :: String -> Int -> Bot ()
 restartBot json ncycles = do
@@ -248,13 +262,26 @@ restartBot json ncycles = do
   where
     cycle x = do
       info $ "CYCLE " ++ show x ++ " --- " ++ json
-      spawnVm json
+      spawnVm (json,Nothing)
       waitVmState Running
       --waitVmLogLine "Dropbear SSH server"
       delay 3000
       killVm
       delay 1000
     killVm = commandSendAndWait CommandQuit >>= assertStatusOK
+
+resumeExitBot :: String -> Int -> Bot ()
+resumeExitBot json ncycles = do
+  mapM_ cycle [1..ncycles]
+  where
+    cycle x = do
+      info $ "CYCLE " ++ show x
+      spawnVm (json, Just "savefile")
+      waitVmState Running
+      delay 2000
+      commandSendAndWait CommandSave >>= assertStatusOK
+      commandSendAndWait CommandQuit >>= assertStatusOK
+      delay 1000
 
 eptfaultBot :: String -> Int -> Bot ()
 eptfaultBot json ncycles = do
@@ -264,7 +291,7 @@ eptfaultBot json ncycles = do
     cycle x = do
       info $ "CYCLE " ++ show x ++ " --- " ++ json
       snapshotVhd "20h2-2.vhd" "20h2.vhd"
-      spawnVm json
+      spawnVm (json,Nothing)
       waitVmState Running
       line <- waitVmLogLine "Back-to-back" waitTimeSecs
       case line of
@@ -442,10 +469,10 @@ handleBotPrompt cmdChannel cmdID port req = handlePrompt req where
     v :: Int <- randomRIO (0, 1)
     return (v == 1)
 
-  handlePrompt (SpawnVm conf) = do
+  handlePrompt (SpawnVm (conf,templ)) = do
     closeChannel =<< getChannel
-    (_,_,_, ph) <- createProcess (uxendm conf port)
-    putStrLn $ "started dm from " ++ conf
+    (_,_,_, ph) <- createProcess (uxendm conf port templ)
+    putStrLn $ "started dm from " ++ conf ++ " template: " ++ show templ
     connectChannel
     where
       closeChannel (Just (CommandChannel sock)) = close sock
@@ -473,12 +500,16 @@ runBot port bot = do
   cc <- newMVar Nothing
   runPromptM (handleBotPrompt cc cmdID port) (unBot bot)
 
-uxendm :: FilePath -> PortNumber -> CreateProcess
-uxendm confPath port = proc (dmPath </> "uxendm.exe") ["-F", confPath, "-C", "tcp:" ++ hostIP ++ ":" ++ show port]
+uxendm :: FilePath -> PortNumber -> Maybe String -> CreateProcess
+uxendm confPath port loadfile = proc (dmPath </> "uxendm.exe") $ ["-F", confPath, "-C", "tcp:" ++ hostIP ++ ":" ++ show port]
+  ++ templ
+  where
+    templ | Just n <- loadfile = ["-l", n]
+          | otherwise = []
 
 runDm :: PortNumber -> IO Dm
 runDm port = do
-  (_,_,_, ph) <- createProcess (uxendm templateJson port)
+  (_,_,_, ph) <- createProcess (uxendm templateJson port Nothing)
   putStrLn "started dm.."
   Just (sock :: Socket) <- S.head $ serially $ S.unfold TCP.acceptOnPort port
   return (Dm ph (CommandChannel sock))
@@ -510,6 +541,8 @@ runSnapshotVhd snapshotName parentName = do
 botFromString :: String -> [Int -> Bot ()]
 botFromString x = case x of
   "resume" -> [resumeBot]
+  "resume2" -> [resumeBot2]
+  "resume-exit" -> [resumeExitBot "win11.json"]
   "resume-abort" -> [resumeAbortBot]
   "save-abort" -> [saveAbortBot]
   "abort-torture" -> [abortTortureBot]
