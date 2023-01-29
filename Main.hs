@@ -303,6 +303,28 @@ eptfaultBot json ncycles = do
           when (x < ncycles) $ do
             cycle (x+1)
     killVm = commandSendAndWait CommandQuit >>= assertStatusOK
+
+stallBot :: Int -> Bot ()
+stallBot ncycles = do
+  cycle 1
+  where
+    waitTimeSecs = 6
+    cycle x = do
+      info $ "CYCLE " ++ show x ++ " --- "
+--      snapshotVhd "win11-stall-snap.vhd" "win11-2.vhd"
+      spawnVm ("win11-stall.json",Just "savefile")
+      waitVmState Running
+      line <- waitVmLogLine "SYSTEM TIME" waitTimeSecs
+      case line of
+        Just l -> info $ "TIME STALL detected!! " ++ l
+        _ -> do
+          info $ "no stall, go on"
+          commandSendAndWait CommandSave >>= assertStatusOK
+          killVm
+          delay 2400
+          when (x < ncycles) $ do
+            cycle (x+1)
+    killVm = commandSendAndWait CommandQuit >>= assertStatusOK
   
 pauseBot :: Int -> Bot ()
 pauseBot ncycles = do
@@ -545,6 +567,7 @@ botFromString x = case x of
   "resume-exit" -> [resumeExitBot "win11.json"]
   "resume-abort" -> [resumeAbortBot]
   "save-abort" -> [saveAbortBot]
+  "stall" -> [stallBot]
   "abort-torture" -> [abortTortureBot]
   "pause" -> [pauseBot]
   "restart" -> [restartBot "testatto.json"]
